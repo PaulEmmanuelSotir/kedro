@@ -29,15 +29,18 @@
 """A collection of CLI commands for working with Kedro project."""
 
 import os
+import json
 import shutil
 import subprocess
 import sys
 import webbrowser
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, Union, List
 
 import click
 from click import secho
+
+import anyconfig
 
 from kedro.framework.cli.cli import _handle_exception
 from kedro.framework.cli.utils import (
@@ -57,7 +60,14 @@ NO_DEPENDENCY_MESSAGE = """{module} is not installed. Please make sure {module} 
 LINT_CHECK_ONLY_HELP = """Check the files for style guide violations, unsorted /
 unformatted imports, and unblackened Python code without modifying the files."""
 OPEN_ARG_HELP = """Open the documentation in your default browser after building."""
-
+CONDA_ARG_HELP = f""" Conda environement filename. Optionnal argument (str or List[str]) specifying conda
+environement configuration filename(s) located in source directory. Default value: "['environment.yml', 'environment.yaml']",
+which means 'kedro install' command will create/update conda environement using the first conda environement file whose name
+matches, if any. Conda environement is created under the prefix/directory "{CONDA_PREFIX}" (or user defined prefix in environment 
+file if any), except if you already created a conda environement manually before calling 'kedro install', then conda environement 
+will only be updated. Conda environement name is parsed from environement file if specified, otherwise conda environment will be 
+named after project name. Kedro install command will try to find existing conda environement to update according to YML env file's 
+'prefix' and/or 'name' before creating a new one. """
 
 def _load_project_context(**kwargs: Any):
     """Returns project context."""
@@ -87,6 +97,97 @@ def _build_reqs(source_path: Path, args: Sequence[str] = ()):
         shutil.copyfile(str(requirements_txt), str(requirements_in))
 
     python_call("piptools", ["compile", "-q", *args, str(requirements_in)])
+
+
+def _run_conda_cmd(*args, **run_kwargs):
+    """ Added for better conda environment support (update or intsall throught `kedro install` command) """
+    proc = subprocess.run(['conda', *args, '--json', '-q'], **run_kwargs)
+    return proc.returncode, json.loads(proc.stdout)
+
+
+def _conda_activate():
+    """ Added for better conda environment support (update or intsall throught `kedro install` command) """
+    raise NotImplementedError  # TODO: implement this
+    # call(['source', 'activate', conda_prefix] if 'posix' in os.name else ['activate', conda_prefix])
+
+
+def _ask(prompt: str, choices: List = ['N', 'Y'], ask_indexes: bool = False):
+    """ Helper function used to ask user to answer or choose among multiple alternatives using a CLI prompt """
+    prompt += ' (Choices: ' + ('; '.join([f'{i}: "{str(e)}""' for i, e in enumerate(choices)]) if ask_indexes else '; '.join(map(str, choices)))
+    choice = input(prompt)
+
+    if ask_indexes:
+        while not choice.isdigit() or int(choice) not in range(len(choices)):
+            choice = input(prompt)
+        return int(choice), choices[int(choice)]
+    else:
+        while(choice not in choices):
+            choice = input(prompt)
+        return choices.index(choice), choice
+
+
+def _conda_install(conda_yml: Union[str, List[str]]):
+    """ Added for better conda environment support (update or intsall throught `kedro install` command) """
+    for conda_config in conda_yml if isinstance(conda_yml, List) else [conda_yml]:
+        config_path = Path.cwd() / get_source_dir(Path.cwd()) / conda_config
+        if config_path.is_file():
+            # Pasre existing conda environement file
+            secho(f'Found existing conda configuration file: "{config_path}".')
+            conda_cfg = anyconfig.load(config_path, ac_parser='yaml')
+            if not conda_cfg:
+                secho(f'Error: Can\'t parse or empty conda environment file "{config_path}"', fg='red')
+                sys.exit(1)
+            cfg_name, cfg_prefix = conda_cfg.get('name'), conda_cfg.get('prefix')
+            name = cfg_name if cfg_name else PROJ_NAME
+            prefix = cfg_prefix if cfg_prefix else DEFAULT_CONDA_PREFIX
+
+            returncode, json = _run_conda_cmd('env', 'list')
+            if returncode:
+                secho('Error: Failed to list conda environments, Conda may not be installed.', fg='red')
+                sys.exit(1)
+
+            # Find out conda environement name and prefix
+            update = False
+            matching_envs = [Path(env) for env in json['envs'] if os.path.split(env)[1] == cfg_name]
+            if ((cfg_prefix and cfg_name and Path(str(cfg_prefix)) / cfg_name in json['envs']) or (not cfg_name and cfg_prefix and Path(str(cfg_prefix)) in json['envs'])):
+                secho(f'Found existing conda environment with matching prefix ("{cfg_prefix}") and name ("{cfg_name}").')
+                update = True
+            elif any(matching_envs) and not conda_cfg:
+                choice = matching_envs[0]
+                if len(matching_envs) == 1:
+                    secho(f'Found a conda environment with matching name ("{matching_envs[0]}") but no prefix have been specified in env file.', fg='yellow')
+                    _, update = _ask('Reuse existing conda environement? (Y/N)')
+                else:
+                    secho(f'Found multiple conda environments with matching name ("{matching_envs}") and no prefix have been specified in env file.', fg='yellow')
+                    _, update = _ask('Would you reuse one of existing conda environements or create a new one? (Y/N)')
+                    if update:
+                        prompt = f'Which conda environement would you reuse?'
+                        _, choice = _ask(prompt, choices=matching_envs, ask_indexes=True)
+                if update:
+                    prefix, name = os.path.split(choice)
+
+            # Create or update conda environement file
+            if update:
+                secho('Trying to update conda environement...')
+                call(['conda', 'env', 'update', '--prefix', prefix, '--name', name, '--file', str(config_path), '--prune', '--json', '-q'])
+                secho('Success.', fg='green')
+            else:
+                secho('Trying to create conda environement...')
+                call(['conda', 'env', 'create', '--prefix', prefix, '--name', name, '--file', str(config_path), '--json', '-q'])
+                secho('Success.', fg='green')
+
+            # Update environement file in order to contain environement name and prefix explicity (avoids eventual future user prompts to choose conda environement to reuse or not)
+            secho('Updating environement file to include name and prefix')
+            if name:
+                conda_cfg['name'] = name
+            if prefix:
+                conda_cfg['prefix'] = prefix
+            anyconfig.dump(conda_cfg, ac_parser='yaml', out=config_path)
+            secho('Sucessfully updated or installed Conda environment from `Kedro install` command.', fg='green')
+
+            # TODO: make sure to activate conda environement before installing other dependencies from pip requirements.txt??
+            #_conda_activate()
+            return
 
 
 @click.group()
@@ -142,26 +243,24 @@ def lint(files, check_only):
 
 
 @project_group.command()
-@click.option(
-    "--build-reqs/--no-build-reqs",
-    "compile_flag",
-    default=None,
-    help="Run `pip-compile` on project requirements before install. "
-    "By default runs only if `src/requirements.in` file doesn't exist.",
-)
-def install(compile_flag):
+@click.option("--build-reqs/--no-build-reqs",
+             "compile_flag",
+             default=None,
+             help="Run `pip-compile` on project requirements before install. By default runs only if `src/requirements.in` file doesn't exist.",)
+@click.option('--conda-yml', '-c', 'conda_yml', type=Union[str, List[str]], default=['environment.yml', 'environment.yaml'], multiple=False, help=CONDA_ARG_HELP)
+def install(compile_flag, conda_yml: Union[str, List[str]]):
     """Install project dependencies from both requirements.txt
     and environment.yml (optional)."""
     # we cannot use `context.project_path` as in other commands since
     # context instantiation might break due to missing dependencies
     # we attempt to install here
     source_path = get_source_dir(Path.cwd())
-    environment_yml = source_path / "environment.yml"
     requirements_in = source_path / "requirements.in"
     requirements_txt = source_path / "requirements.txt"
 
-    if environment_yml.is_file():
-        call(["conda", "install", "--file", str(environment_yml), "--yes"])
+    # TODO: parse json outputs from conda (and eventually use 'conda info --envs --json' in order to see available envs (sucessfull creation))
+    if conda_yml:
+        _conda_install(conda_yml)
 
     default_compile = bool(compile_flag is None and not requirements_in.is_file())
     do_compile = compile_flag or default_compile
