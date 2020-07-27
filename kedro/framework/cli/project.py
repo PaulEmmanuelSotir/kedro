@@ -60,14 +60,10 @@ NO_DEPENDENCY_MESSAGE = """{module} is not installed. Please make sure {module} 
 LINT_CHECK_ONLY_HELP = """Check the files for style guide violations, unsorted /
 unformatted imports, and unblackened Python code without modifying the files."""
 OPEN_ARG_HELP = """Open the documentation in your default browser after building."""
-CONDA_ARG_HELP = f""" Conda environement filename. Optionnal argument (str or List[str]) specifying conda
-environement configuration filename(s) located in source directory. Default value: "['environment.yml', 'environment.yaml']",
-which means 'kedro install' command will create/update conda environement using the first conda environement file whose name
-matches, if any. Conda environement is created under the prefix/directory "{CONDA_PREFIX}" (or user defined prefix in environment 
-file if any), except if you already created a conda environement manually before calling 'kedro install', then conda environement 
-will only be updated. Conda environement name is parsed from environement file if specified, otherwise conda environment will be 
-named after project name. Kedro install command will try to find existing conda environement to update according to YML env file's 
-'prefix' and/or 'name' before creating a new one. """
+CONDA_ARG_HELP = f""" Conda environement filename. Optional argument (str) specifying conda
+environement configuration filename located in source directory. Default value: "['environment.yml', 'environment.yaml', 'env.yml', 'env.yaml']",
+which means 'kedro install' command will try to create or update conda environement using the 
+first conda environement file whose name matches one of these strings. """
 
 def _load_project_context(**kwargs: Any):
     """Returns project context."""
